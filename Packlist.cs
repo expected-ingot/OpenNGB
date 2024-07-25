@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Tasks;
@@ -29,6 +30,8 @@ using System.Threading.Tasks;
         byte nameLength (must be < 32)
         byte encryptedName[nameLength]
         byte encryptedKeyString[0x20] // 32
+    
+    Part of Arc.Trackmania was copied for use in `DecryptEntries()`.
 */
 
 
@@ -44,6 +47,8 @@ namespace OpenNGB
             public uint salt;
             public PackEntry[] entries;
             public byte[] signature;
+
+            public byte[] nameKey;
         }
         public struct PackEntry
         {
@@ -51,31 +56,64 @@ namespace OpenNGB
             public int nameLength; // < 32
             public byte[] encryptedName;
             public byte[] encryptedKeyString;
+
+            public byte[] rawName;
+            public string name;
+            public byte[] key;
+            public byte[] keyStringKey;
+            public byte[] keyString;
+
         }
-        public static PacklistStructure ParseFile(string filePath)
+        public static void DecryptEntries(ref PacklistStructure structure)
         {
-            byte[] buffer = File.ReadAllBytes(filePath);
+            MD5CryptoServiceProvider _md5 = new MD5CryptoServiceProvider();
+            structure.nameKey = _md5.ComputeHash(Encoding.ASCII.GetBytes("6611992868945B0B59536FC3226F3FD0" + structure.salt));
+            for (int i = 0; i < structure.numPacks; i++)
+            {
+                // Decrypt .PAK filenames
+                PackEntry entry = structure.entries[i];
+                entry.rawName = entry.encryptedName;
+                for (int j = 0; j < entry.encryptedName.Length; j++)
+                {
+                    entry.rawName[j] ^= structure.nameKey[j % 16];
+                }
+                entry.name = Encoding.ASCII.GetString(entry.rawName);
+
+                entry.keyStringKey = _md5.ComputeHash(Encoding.ASCII.GetBytes(entry.name + structure.salt + "B97C1205648A66E04F86A1B5D5AF9862"));
+                entry.keyString = new byte[0x20];
+                for (int j = 0; j < 0x20; j++)
+                {
+                    entry.keyString[j] = (byte)(entry.encryptedKeyString[j] ^ entry.keyStringKey[j % 16]);
+                }
+                entry.key = _md5.ComputeHash(Encoding.ASCII.GetBytes(entry.keyString + "NadeoPak"));
+
+                structure.entries[i] = entry;
+            }
+        }
+        public static bool VerifySignature(BinaryReader reader, PacklistStructure structure)
+        {
+            return false
+        }
+        public static PacklistStructure ReadPacklistStructure(string filePath)
+        {
+            BinaryReader binaryReader = new BinaryReader(File.OpenRead(filePath));
             PacklistStructure output = new PacklistStructure();
-            output.version = buffer[0];
-            output.numPacks = buffer[1];
-            output.crc32 = System.BitConverter.ToUInt32(buffer, 2); // 0
-            output.salt = System.BitConverter.ToUInt32(buffer, 6);
+            output.version = binaryReader.ReadByte(); // 1
+            output.numPacks = binaryReader.ReadByte();
+            output.crc32 = binaryReader.ReadUInt32();
+            output.salt = binaryReader.ReadUInt32();
             output.entries = new PackEntry[output.numPacks];
-            int position = 9;
             for (int i = 0; i < output.numPacks; i++)
             {
                 PackEntry entry = new PackEntry();
-                entry.flags = buffer[position + 1];
-                entry.nameLength = buffer[position + 2];
-                entry.encryptedName = new byte[entry.nameLength];
-                Array.Copy(buffer, position + 2, entry.encryptedName, 0, entry.nameLength);
-                entry.encryptedKeyString = new byte[32]; // 0x20
-                Array.Copy(buffer, position + 2 + entry.nameLength, entry.encryptedKeyString, 0, 32); // 0x20
-                position = position + 2 + entry.nameLength + 32;
+                entry.flags = binaryReader.ReadByte();
+                entry.nameLength = binaryReader.ReadByte();
+                entry.encryptedName = binaryReader.ReadBytes(entry.nameLength);
+                entry.encryptedKeyString = binaryReader.ReadBytes(0x20); // 32
                 output.entries[i] = entry;
             }
-            output.signature = new byte[16];
-            Array.Copy(buffer, position + 1, output.signature, 0, 16);
+            output.signature = binaryReader.ReadBytes(0x10); // 16
+            DecryptEntries(ref output);
             return output;
         }
     }
